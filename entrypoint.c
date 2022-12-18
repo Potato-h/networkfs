@@ -38,11 +38,11 @@ struct dentry* networkfs_mount(struct file_system_type *fs_type, int flags, cons
 	ret = mount_nodev(fs_type, flags, data, networkfs_fill_super);
 	if (ret == NULL)
 	{
-		printk(KERN_ERR "Can't mount file system");
+		printk(KERN_ERR "Can't mount file system\n");
 	}
 	else
 	{
-		printk(KERN_INFO "Mounted successfuly");
+		printk(KERN_INFO "Mounted successfuly\n");
 	}
 	return ret;
 }
