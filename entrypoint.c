@@ -328,10 +328,9 @@ ssize_t networkfs_write(struct file *filp, const char *buffer, size_t len,
   printk(KERN_INFO "len: %d, encoded_content: %s\n", strlen(encoded_content),
          encoded_content);
 
-  uint64_t x;
   rc = networkfs_http_call((const char *)filp->f_inode->i_sb->s_fs_info,
-                           "write", (void *)&x, sizeof(uint64_t), 2, "inode",
-                           inode_id, "content", encoded_content);
+                           "write", NULL, 0, 2, "inode", inode_id, "content",
+                           encoded_content);
 
   printk(KERN_INFO "write: rc = %d\n", rc);
 
