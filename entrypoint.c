@@ -11,7 +11,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Shpilkov Ilya");
 MODULE_VERSION("0.01");
 
-//#define RELEASE
+#define RELEASE
 #ifdef RELEASE
 #define printk(fmt, ...) ;
 #endif
@@ -80,9 +80,8 @@ struct dentry *networkfs_lookup(struct inode *parent_inode,
       parent_inode->i_sb->s_fs_info, "lookup", (void *)&entry_info,
       sizeof(struct networkfs_entry_info), 2, "parent", inode_id, "name", name);
 
-  printk(KERN_INFO "lookup: rc = %d\n", rc);
-
   if (rc != 0) {
+    printk(KERN_ERR "lookup failed: %d\n", rc);
     kfree(name);
     return NULL;
   }
@@ -106,7 +105,6 @@ int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
   char *name =
       encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
 
-  // TODO: error handling
   ino_t new_inode;
   const char *type = mode & S_IFREG ? "file" : "directory";
   char parent_inode_id[20];
@@ -115,11 +113,10 @@ int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
       (const char *)parent_inode->i_sb->s_fs_info, "create", (void *)&new_inode,
       sizeof(ino_t), 3, "parent", parent_inode_id, "name", name, "type", type);
 
-  printk(KERN_INFO "create: rc = %d\n", rc);
-
-  if (rc != 0) {
+  if (rc < 0) {
+    printk(KERN_ERR "create failed: %d\n", rc);
     kfree(name);
-    return 0;
+    return rc;
   }
 
   inode =
@@ -153,7 +150,6 @@ int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
   char *name =
       encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
 
-  // TODO: error handling
   ino_t new_inode;
   char parent_inode_id[20];
   sprintf(parent_inode_id, "%ld", root);
@@ -162,9 +158,8 @@ int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
                           (void *)&new_inode, sizeof(ino_t), 3, "parent",
                           parent_inode_id, "name", name, "type", "directory");
 
-  printk(KERN_INFO "mkdir: rc = %d\n", rc);
-
-  if (rc != 0) {
+  if (rc < 0) {
+    printk(KERN_ERR "mkdir failed: %d\n", rc);
     kfree(name);
     return 0;
   }
@@ -203,18 +198,13 @@ struct inode_operations networkfs_inode_ops = {
 
 int networkfs_iterate(struct file *filp, struct dir_context *ctx) {
   char *fsname;
-  struct dentry *dentry;
-  struct inode *inode;
-  unsigned long offset;
-  int stored;
   unsigned char ftype;
-  ino_t ino;
   ino_t dino;
-  dentry = filp->f_path.dentry;
-  inode = dentry->d_inode;
-  offset = filp->f_pos;
-  stored = 0;
-  ino = inode->i_ino;
+  struct dentry *dentry = filp->f_path.dentry;
+  struct inode *inode = dentry->d_inode;
+  unsigned long offset = filp->f_pos;
+  int stored = 0;
+  ino_t ino = inode->i_ino;
   char inode_id[20];
   sprintf(inode_id, "%ld", ino);
 
@@ -226,13 +216,14 @@ int networkfs_iterate(struct file *filp, struct dir_context *ctx) {
       sizeof(struct networkfs_entries), 1, "inode", inode_id);
   printk(KERN_INFO "token: %s, rc: %d", (char *)dentry->d_sb->s_fs_info, rc);
 
-  if (rc == 0) {
-    printk(KERN_INFO "success, so try to get count = %zu\n",
-           response->entries_count);
-  } else {
+  if (rc < 0) {
+    printk(KERN_ERR "list request failed: %d\n", rc);
     kfree(response);
-    return 0;
+    return rc;
   }
+
+  printk(KERN_INFO "success, so try to get count = %zu\n",
+         response->entries_count);
 
   while (true) {
     if (offset == 0) {
@@ -257,6 +248,7 @@ int networkfs_iterate(struct file *filp, struct dir_context *ctx) {
     offset++;
     ctx->pos = offset;
   }
+  // Unreachable
   return stored;
 }
 
@@ -276,24 +268,33 @@ ssize_t networkfs_read(struct file *filp, char *buffer, size_t len,
   int rc = networkfs_http_call((const char *)filp->f_inode->i_sb->s_fs_info,
                                "read", response, 1024, 1, "inode", inode_id);
 
-  printk(KERN_INFO "read: rc = %d\n", rc);
-
-  if (rc != 0) {
-    return 0;
+  if (rc < 0) {
+    printk(KERN_ERR "read failed: %d\n", rc);
+    kfree(response);
+    return rc;
   }
 
   uint64_t content_len = *(uint64_t *)response;
-  void *content = response + sizeof(uint64_t);
-  if (*offset >= content_len) {
+  if (*offset == content_len) {
     return 0;
   }
 
+  void *content = response + sizeof(uint64_t);
+  if (*offset > content_len) {
+    kfree(response);
+    return -E2BIG;
+  }
+
   uint64_t avaiable = min(content_len - *offset, len);
-  // TODO: copy to user can return less than avaiable
-  copy_to_user(buffer, content + *offset, avaiable);
+  rc = avaiable;
+  if (copy_to_user(buffer, content + *offset, avaiable) != 0) {
+    avaiable = 0;
+    rc = -1;
+  }
+
   *offset += avaiable;
   kfree(response);
-  return avaiable;
+  return rc;
 }
 
 ssize_t networkfs_write(struct file *filp, const char *buffer, size_t len,
@@ -309,18 +310,26 @@ ssize_t networkfs_write(struct file *filp, const char *buffer, size_t len,
 
   printk(KERN_INFO "copy file to local: rc = %d\n", rc);
 
-  if (rc != 0) {
-    return 0;
+  if (rc < 0) {
+    printk(KERN_ERR "write failed: %d\n", rc);
+    kfree(response);
+    return rc;
   }
 
   uint64_t content_len = *(uint64_t *)response;
   void *content = response + sizeof(uint64_t);
   if (*offset > content_len) {
     printk(KERN_ERR "offset is to big\n");
-    return 0;
+    kfree(response);
+    return -E2BIG;
   }
 
-  copy_from_user(content + *offset, buffer, len);
+  if (copy_from_user(content + *offset, buffer, len) != 0) {
+    printk("write copy_from_user failed\n");
+    kfree(response);
+    return -1;
+  }
+
   content_len = *offset + len;
   *(char *)(content + content_len) = 0;
   char *encoded_content = encode_url_query(content, content_len);
@@ -332,10 +341,10 @@ ssize_t networkfs_write(struct file *filp, const char *buffer, size_t len,
                            "write", NULL, 0, 2, "inode", inode_id, "content",
                            encoded_content);
 
-  printk(KERN_INFO "write: rc = %d\n", rc);
-
-  if (rc != 0) {
+  if (rc < 0) {
+    printk(KERN_ERR "write failed: %d\n", rc);
     kfree(encoded_content);
+    kfree(response);
     return rc;
   }
 
