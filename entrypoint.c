@@ -11,8 +11,41 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Shpilkov Ilya");
 MODULE_VERSION("0.01");
 
+//#define RELEASE
+#ifdef RELEASE
+#define printk(fmt, ...) ;
+#endif
+
 struct inode_operations networkfs_inode_ops;
 struct file_operations networkfs_dir_ops;
+struct file_operations networkfs_file_ops;
+
+char tohex(char c) {
+  if (c < 10) {
+    return '0' + c;
+  } else {
+    return 'a' + c - 10;
+  }
+}
+
+char *encode_symbol(char c) {
+  static char ans[4];
+  ans[0] = '%';
+  ans[1] = tohex(c / 16);
+  ans[2] = tohex(c % 16);
+  ans[3] = 0;
+  return ans;
+}
+
+char *encode_url_query(const char *query, size_t len) {
+  char *encoded = kzalloc(3 * len + 1, GFP_KERNEL);
+
+  for (size_t i = 0; i < len; i++) {
+    strcat(encoded, encode_symbol(query[i]));
+  }
+
+  return encoded;
+}
 
 struct inode *networkfs_get_inode(struct super_block *sb,
                                   const struct inode *dir, umode_t mode,
@@ -26,6 +59,7 @@ struct inode *networkfs_get_inode(struct super_block *sb,
     inode->i_op = &networkfs_inode_ops;
 
     if (mode & S_IFDIR) inode->i_fop = &networkfs_dir_ops;
+    if (mode & S_IFREG) inode->i_fop = &networkfs_file_ops;
   }
   return inode;
 }
@@ -36,50 +70,46 @@ struct dentry *networkfs_lookup(struct inode *parent_inode,
   printk(KERN_INFO "lookup to %s\n", child_dentry->d_name.name);
   ino_t root;
   struct inode *inode;
-  const char *name = child_dentry->d_name.name;
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
   root = parent_inode->i_ino;
-  char inode_id[16];
+  char inode_id[20];
   sprintf(inode_id, "%ld", root);
-  struct networkfs_entries *response =
-      kmalloc(sizeof(struct networkfs_entries), GFP_KERNEL);
+  struct networkfs_entry_info entry_info;
   int rc = networkfs_http_call(
-      parent_inode->i_sb->s_fs_info, "list", (void *)response,
-      sizeof(struct networkfs_entries), 1, "inode", inode_id);
-  printk(KERN_INFO "rc: %d", rc);
+      parent_inode->i_sb->s_fs_info, "lookup", (void *)&entry_info,
+      sizeof(struct networkfs_entry_info), 2, "parent", inode_id, "name", name);
 
-  if (rc == 0) {
-    printk(KERN_INFO "success, so try to get count = %zu\n",
-           response->entries_count);
-  } else {
-    kfree(response);
+  printk(KERN_INFO "lookup: rc = %d\n", rc);
+
+  if (rc != 0) {
+    kfree(name);
     return NULL;
   }
 
-  for (size_t i = 0; i < response->entries_count; i++) {
-    if (!strcmp(name, response->entries[i].name)) {
-      mode_t type =
-          response->entries[i].entry_type == DT_DIR ? S_IFDIR : S_IFREG;
-      inode = networkfs_get_inode(parent_inode->i_sb, NULL, type | 0777,
-                                  response->entries[i].ino);
-      d_add(child_dentry, inode);
-    }
-  }
-
-  kfree(response);
+  umode_t mode = entry_info.entry_type == DT_DIR ? S_IFDIR : S_IFREG;
+  inode = networkfs_get_inode(parent_inode->i_sb, parent_inode, mode | 0777,
+                              entry_info.ino);
+  d_add(child_dentry, inode);
+  kfree(name);
   return NULL;
 }
 
 int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
                      struct dentry *child_dentry, umode_t mode, bool b) {
+  printk(KERN_INFO "try create name: %s\n", child_dentry->d_name.name);
+
   ino_t root;
   struct inode *inode;
-  const char *name = child_dentry->d_name.name;
   root = parent_inode->i_ino;
+
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
 
   // TODO: error handling
   ino_t new_inode;
   const char *type = mode & S_IFREG ? "file" : "directory";
-  char parent_inode_id[10];
+  char parent_inode_id[20];
   sprintf(parent_inode_id, "%ld", root);
   int rc = networkfs_http_call(
       (const char *)parent_inode->i_sb->s_fs_info, "create", (void *)&new_inode,
@@ -88,6 +118,7 @@ int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
   printk(KERN_INFO "create: rc = %d\n", rc);
 
   if (rc != 0) {
+    kfree(name);
     return 0;
   }
 
@@ -95,20 +126,23 @@ int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
       networkfs_get_inode(parent_inode->i_sb, NULL, S_IFREG | 0777, new_inode);
   d_add(child_dentry, inode);
 
+  kfree(name);
   return 0;
 }
 
 int networkfs_unlink(struct inode *parent_inode, struct dentry *child_dentry) {
-  const char *name = child_dentry->d_name.name;
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
   ino_t root = parent_inode->i_ino;
 
-  char parent_inode_id[10];
+  char parent_inode_id[20];
   sprintf(parent_inode_id, "%ld", root);
   int rc =
       networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "unlink",
                           NULL, 0, 2, "parent", parent_inode_id, "name", name);
 
   printk(KERN_INFO "unlink: rc = %d\n", rc);
+  kfree(name);
   return 0;
 }
 
@@ -116,11 +150,12 @@ int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
                     struct dentry *child_dentry, umode_t mode) {
   struct inode *inode;
   ino_t root = parent_inode->i_ino;
-  const char *name = child_dentry->d_name.name;
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
 
   // TODO: error handling
   ino_t new_inode;
-  char parent_inode_id[10];
+  char parent_inode_id[20];
   sprintf(parent_inode_id, "%ld", root);
   int rc =
       networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "create",
@@ -130,6 +165,7 @@ int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
   printk(KERN_INFO "mkdir: rc = %d\n", rc);
 
   if (rc != 0) {
+    kfree(name);
     return 0;
   }
 
@@ -137,20 +173,23 @@ int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
                               new_inode);
   d_add(child_dentry, inode);
 
+  kfree(name);
   return 0;
 }
 
 int networkfs_rmdir(struct inode *parent_inode, struct dentry *child_dentry) {
-  const char *name = child_dentry->d_name.name;
   ino_t root = parent_inode->i_ino;
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
 
-  char parent_inode_id[10];
+  char parent_inode_id[20];
   sprintf(parent_inode_id, "%ld", root);
   int rc =
       networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "rmdir",
                           NULL, 0, 2, "parent", parent_inode_id, "name", name);
 
   printk(KERN_INFO "rmdir: rc = %d\n", rc);
+  kfree(name);
   return 0;
 }
 
@@ -176,7 +215,7 @@ int networkfs_iterate(struct file *filp, struct dir_context *ctx) {
   offset = filp->f_pos;
   stored = 0;
   ino = inode->i_ino;
-  char inode_id[10];
+  char inode_id[20];
   sprintf(inode_id, "%ld", ino);
 
   // Store at heap instead of stack to minimize stack frame
@@ -223,6 +262,97 @@ int networkfs_iterate(struct file *filp, struct dir_context *ctx) {
 
 struct file_operations networkfs_dir_ops = {
     .iterate = networkfs_iterate,
+};
+
+int networkfs_open(struct inode *node, struct file *filp) { return 0; }
+
+ssize_t networkfs_read(struct file *filp, char *buffer, size_t len,
+                       loff_t *offset) {
+  ino_t ino = filp->f_inode->i_ino;
+  void *response = kmalloc(1024, GFP_KERNEL);
+
+  char inode_id[20];
+  sprintf(inode_id, "%ld", ino);
+  int rc = networkfs_http_call((const char *)filp->f_inode->i_sb->s_fs_info,
+                               "read", response, 1024, 1, "inode", inode_id);
+
+  printk(KERN_INFO "read: rc = %d\n", rc);
+
+  if (rc != 0) {
+    return 0;
+  }
+
+  uint64_t content_len = *(uint64_t *)response;
+  void *content = response + sizeof(uint64_t);
+  if (*offset >= content_len) {
+    return 0;
+  }
+
+  uint64_t avaiable = min(content_len - *offset, len);
+  // TODO: copy to user can return less than avaiable
+  copy_to_user(buffer, content + *offset, avaiable);
+  *offset += avaiable;
+  kfree(response);
+  return avaiable;
+}
+
+ssize_t networkfs_write(struct file *filp, const char *buffer, size_t len,
+                        loff_t *offset) {
+  printk(KERN_INFO "enter write: len = %d, offset = %d\n", len, *offset);
+  ino_t ino = filp->f_inode->i_ino;
+  void *response = kmalloc(1024, GFP_KERNEL);
+
+  char inode_id[20];
+  sprintf(inode_id, "%ld", ino);
+  int rc = networkfs_http_call((const char *)filp->f_inode->i_sb->s_fs_info,
+                               "read", response, 1024, 1, "inode", inode_id);
+
+  printk(KERN_INFO "copy file to local: rc = %d\n", rc);
+
+  if (rc != 0) {
+    return 0;
+  }
+
+  uint64_t content_len = *(uint64_t *)response;
+  void *content = response + sizeof(uint64_t);
+  if (*offset > content_len) {
+    printk(KERN_ERR "offset is to big\n");
+    return 0;
+  }
+
+  copy_from_user(content + *offset, buffer, len);
+  content_len = *offset + len;
+  *(char *)(content + content_len) = 0;
+  char *encoded_content = encode_url_query(content, content_len);
+
+  printk(KERN_INFO "len: %d, encoded_content: %s\n", strlen(encoded_content),
+         encoded_content);
+
+  uint64_t x;
+  rc = networkfs_http_call((const char *)filp->f_inode->i_sb->s_fs_info,
+                           "write", (void *)&x, sizeof(uint64_t), 2, "inode",
+                           inode_id, "content", encoded_content);
+
+  printk(KERN_INFO "write: rc = %d\n", rc);
+
+  if (rc != 0) {
+    kfree(encoded_content);
+    return rc;
+  }
+
+  *offset += len;
+  kfree(encoded_content);
+  kfree(response);
+  return len;
+}
+
+int networkfs_release(struct inode *inode, struct file *filp) { return 0; }
+
+struct file_operations networkfs_file_ops = {
+    .open = networkfs_open,
+    .read = networkfs_read,
+    .write = networkfs_write,
+    .release = networkfs_release,
 };
 
 int networkfs_fill_super(struct super_block *sb, void *data, int silent) {

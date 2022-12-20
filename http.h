@@ -20,6 +20,11 @@ struct networkfs_entries {
   } entries[16];
 };
 
+struct networkfs_entry_info {
+  unsigned char entry_type;  // DT_DIR (4) or DT_REG (8)
+  ino_t ino;
+};
+
 /**
  * networkfs_http_call - make a call to networkfs API.
  * @token:           Unique filesystem token.
