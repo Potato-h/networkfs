@@ -81,7 +81,6 @@ struct dentry *networkfs_lookup(struct inode *parent_inode,
       sizeof(struct networkfs_entry_info), 2, "parent", inode_id, "name", name);
 
   if (rc != 0) {
-    printk(KERN_ERR "lookup failed: %d\n", rc);
     kfree(name);
     return NULL;
   }
@@ -94,8 +93,9 @@ struct dentry *networkfs_lookup(struct inode *parent_inode,
   return NULL;
 }
 
-int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
-                     struct dentry *child_dentry, umode_t mode, bool b) {
+int networkfs_generic_create(struct user_namespace *ns,
+                             struct inode *parent_inode,
+                             struct dentry *child_dentry, umode_t mode) {
   printk(KERN_INFO "try create name: %s\n", child_dentry->d_name.name);
 
   ino_t root;
@@ -119,73 +119,53 @@ int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
     return rc;
   }
 
-  inode =
-      networkfs_get_inode(parent_inode->i_sb, NULL, S_IFREG | 0777, new_inode);
+  inode = networkfs_get_inode(parent_inode->i_sb, NULL, mode | 0777, new_inode);
   d_add(child_dentry, inode);
+
+  kfree(name);
+  return 0;
+}
+
+int networkfs_create(struct user_namespace *ns, struct inode *parent_inode,
+                     struct dentry *child_dentry, umode_t mode, bool b) {
+  return networkfs_generic_create(ns, parent_inode, child_dentry,
+                                  mode | S_IFREG);
+}
+
+int networkfs_remove(struct inode *parent_inode, struct dentry *child_dentry,
+                     const char *op) {
+  char *name =
+      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
+  ino_t root = parent_inode->i_ino;
+
+  char parent_inode_id[20];
+  sprintf(parent_inode_id, "%ld", root);
+  int rc =
+      networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, op, NULL,
+                          0, 2, "parent", parent_inode_id, "name", name);
+
+  printk(KERN_INFO "%s: rc = %d\n", op, rc);
+  if (rc < 0) {
+    kfree(name);
+    return rc;
+  }
 
   kfree(name);
   return 0;
 }
 
 int networkfs_unlink(struct inode *parent_inode, struct dentry *child_dentry) {
-  char *name =
-      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
-  ino_t root = parent_inode->i_ino;
-
-  char parent_inode_id[20];
-  sprintf(parent_inode_id, "%ld", root);
-  int rc =
-      networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "unlink",
-                          NULL, 0, 2, "parent", parent_inode_id, "name", name);
-
-  printk(KERN_INFO "unlink: rc = %d\n", rc);
-  kfree(name);
-  return 0;
+  return networkfs_remove(parent_inode, child_dentry, "unlink");
 }
 
 int networkfs_mkdir(struct user_namespace *ns, struct inode *parent_inode,
                     struct dentry *child_dentry, umode_t mode) {
-  struct inode *inode;
-  ino_t root = parent_inode->i_ino;
-  char *name =
-      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
-
-  ino_t new_inode;
-  char parent_inode_id[20];
-  sprintf(parent_inode_id, "%ld", root);
-  int rc =
-      networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "create",
-                          (void *)&new_inode, sizeof(ino_t), 3, "parent",
-                          parent_inode_id, "name", name, "type", "directory");
-
-  if (rc < 0) {
-    printk(KERN_ERR "mkdir failed: %d\n", rc);
-    kfree(name);
-    return 0;
-  }
-
-  inode = networkfs_get_inode(parent_inode->i_sb, parent_inode, S_IFDIR | 0777,
-                              new_inode);
-  d_add(child_dentry, inode);
-
-  kfree(name);
-  return 0;
+  return networkfs_generic_create(ns, parent_inode, child_dentry,
+                                  mode | S_IFDIR);
 }
 
 int networkfs_rmdir(struct inode *parent_inode, struct dentry *child_dentry) {
-  ino_t root = parent_inode->i_ino;
-  char *name =
-      encode_url_query(child_dentry->d_name.name, child_dentry->d_name.len);
-
-  char parent_inode_id[20];
-  sprintf(parent_inode_id, "%ld", root);
-  int rc =
-      networkfs_http_call((const char *)parent_inode->i_sb->s_fs_info, "rmdir",
-                          NULL, 0, 2, "parent", parent_inode_id, "name", name);
-
-  printk(KERN_INFO "rmdir: rc = %d\n", rc);
-  kfree(name);
-  return 0;
+  return networkfs_remove(parent_inode, child_dentry, "rmdir");
 }
 
 struct inode_operations networkfs_inode_ops = {
